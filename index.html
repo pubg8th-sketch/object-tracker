@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>터치 기반 물체 지정 및 예상 경로 추적</title>
+    <title>물체 예측 및 투사 지점 타겟팅</title>
     <style>
         body {
             margin: 0;
@@ -71,7 +71,7 @@
 </head>
 <body>
 
-    <h2>물체 지정 및 예상 경로 추적</h2>
+    <h2>공 던지기 예측 타겟팅 시스템</h2>
     <div class="controls">
         <button id="switchCameraBtn">카메라 전환 (전면/후면)</button>
     </div>
@@ -79,7 +79,7 @@
         <video id="webcam" autoplay playsinline muted></video>
         <canvas id="outputCanvas"></canvas>
     </div>
-    <div class="info">화면의 움직일 물체를 <strong>손가락으로 톡 터치</strong>하세요! (초록색 테두리: 지정된 물체 / 붉은 점: 예상 경로)</div>
+    <div class="info">추적할 물체를 <strong>터치</strong>하세요! (초록색: 현재 물체 / <strong>빨간색 큰 타겟: 공을 던져 맞출 곳</strong>)</div>
 
     <script>
         const video = document.getElementById('webcam');
@@ -89,7 +89,7 @@
         const container = document.getElementById('videoContainer');
 
         let currentStream = null;
-        let useFrontCamera = true; // 전면/후면 토글 상태
+        let useFrontCamera = true;
         
         let targetColor = null; 
         let trackedObject = null; 
@@ -134,43 +134,58 @@
             await startCamera();
         });
 
-        // 태블릿 터치 및 마우스 클릭 이벤트 공통 처리 함수
+        // 터치 및 클릭 위치 처리 (색상 추출 오차 보완을 위해 주변 3x3 평균 색상 추출)
         function handleTouchOrClick(clientX, clientY) {
             const rect = canvas.getBoundingClientRect();
-            
-            // 화면에 표시된 크기와 실제 비디오 해상도 비율 계산
             const scaleX = canvas.width / rect.width;
             const scaleY = canvas.height / rect.height;
             
             const clickX = (clientX - rect.left) * scaleX;
             const clickY = (clientY - rect.top) * scaleY;
 
-            // 터치한 위치의 실제 비디오 프레임 색상 가져오기
-            const pixelData = ctx.getImageData(Math.floor(clickX), Math.floor(clickY), 1, 1).data;
-            targetColor = { r: pixelData[0], g: pixelData[1], b: pixelData[2] };
+            // 주변 영역의 색상을 평균내어 인식률 향상
+            const sampleSize = 5;
+            const startX = Math.max(0, Math.floor(clickX - sampleSize));
+            const startY = Math.max(0, Math.floor(clickY - sampleSize));
+            const pWidth = sampleSize * 2;
+            const pHeight = sampleSize * 2;
+
+            const pixelData = ctx.getImageData(startX, startY, pWidth, pHeight).data;
+            let rSum = 0, gSum = 0, bSum = 0, total = 0;
+
+            for (let i = 0; i < pixelData.length; i += 4) {
+                rSum += pixelData[i];
+                gSum += pixelData[i+1];
+                bSum += pixelData[i+2];
+                total++;
+            }
+
+            targetColor = { 
+                r: rSum / total, 
+                g: gSum / total, 
+                b: bSum / total 
+            };
+            
             trackedObject = { x: clickX, y: clickY };
             historyPoints = [{ x: clickX, y: clickY }];
         }
 
-        // 마우스 클릭 지원
         container.addEventListener('click', (e) => {
             handleTouchOrClick(e.clientX, e.clientY);
         });
 
-        // 태블릿/모바일 터치 지원 (터치 순간 즉시 반응)
         container.addEventListener('touchstart', (e) => {
             if (e.touches.length > 0) {
                 const touch = e.touches[0];
                 handleTouchOrClick(touch.clientX, touch.clientY);
-                e.preventDefault(); // 화면 스크롤 방지
+                e.preventDefault();
             }
         }, { passive: false });
 
-        // 실시간 비디오 분석 및 추적 루프
+        // 비디오 분석 및 추적 루프
         function processVideo() {
             if (video.paused || video.ended) return;
 
-            // 비디오 프레임을 캔버스에 그리기
             ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
             if (targetColor) {
@@ -180,17 +195,18 @@
                 const height = canvas.height;
 
                 let sumX = 0, sumY = 0, count = 0;
-                const colorThreshold = 55; // 색상 유사도 판정 범위
+                // [인식률 개선] 허용 오차 범위를 넓혀서 조명 변화나 흔들림에도 잘 잡히도록 함
+                const colorThreshold = 85; 
 
-                // 직전 위치 주변을 우선 탐색하여 속도 향상
-                const searchRadius = 90;
+                // 탐색 반경을 넓혀서 물체가 빠르게 움직여도 놓치지 않도록 함
+                const searchRadius = 140;
                 const startX = trackedObject ? Math.max(0, Math.floor(trackedObject.x - searchRadius)) : 0;
                 const endX = trackedObject ? Math.min(width, Math.floor(trackedObject.x + searchRadius)) : width;
                 const startY = trackedObject ? Math.max(0, Math.floor(trackedObject.y - searchRadius)) : 0;
                 const endY = trackedObject ? Math.min(height, Math.floor(trackedObject.y + searchRadius)) : height;
 
-                for (let y = startY; y < endY; y += 3) {
-                    for (let x = startX; x < endX; x += 3) {
+                for (let y = startY; y < endY; y += 4) {
+                    for (let x = startX; x < endX; x += 4) {
                         let idx = (y * width + x) * 4;
                         let r = data[idx];
                         let g = data[idx + 1];
@@ -205,14 +221,14 @@
                     }
                 }
 
-                // 지정한 색상의 물체가 감지된 경우
-                if (count > 25) {
+                // [인식률 개선] 최소 감지 픽셀 수를 낮추어 작은 물체나 일부가 가려져도 추적 유지
+                if (count > 10) {
                     let cx = sumX / count;
                     let cy = sumY / count;
                     trackedObject = { x: cx, y: cy };
 
                     historyPoints.push({ x: cx, y: cy });
-                    if (historyPoints.length > 8) {
+                    if (historyPoints.length > 10) {
                         historyPoints.shift();
                     }
                 }
@@ -222,20 +238,20 @@
             requestAnimationFrame(processVideo);
         }
 
-        // 화면에 초록색 테두리와 붉은 점(예상 경로) 그리기
+        // 공을 던져 맞출 곳(예상 낙리지점)에 큰 타겟점 그리기
         function drawVisualizations() {
             if (historyPoints.length > 0) {
                 let current = historyPoints[historyPoints.length - 1];
 
                 // 1. 현재 물체 위치 (초록색 원)
                 ctx.beginPath();
-                ctx.arc(current.x, current.y, 16, 0, 2 * Math.PI);
+                ctx.arc(current.x, current.y, 14, 0, 2 * Math.PI);
                 ctx.strokeStyle = '#00FF00';
                 ctx.lineWidth = 3;
                 ctx.stroke();
 
-                if (historyPoints.length >= 2) {
-                    // 2. 이동 방향 및 속도 계산
+                if (historyPoints.length >= 3) {
+                    // 2. 이동 속도 및 방향 벡터 계산 (최근 이동 평균)
                     let dx = 0, dy = 0;
                     for (let i = 1; i < historyPoints.length; i++) {
                         dx += historyPoints[i].x - historyPoints[i-1].x;
@@ -244,22 +260,35 @@
                     dx /= (historyPoints.length - 1);
                     dy /= (historyPoints.length - 1);
 
-                    // 3. 미래 예상 경로를 붉은 점으로 표시
-                    const predictionSteps = 12;
-                    for (let step = 1; step <= predictionSteps; step++) {
-                        let predX = current.x + dx * step * 1.5;
-                        let predY = current.y + dy * step * 1.5;
+                    // 3. [공 던지기 타겟] 물체가 날아갈 미래 예상 지점 (더 멀리 앞서서 예측)
+                    const predictionFactor = 12; // 이 값을 키우면 더 미래의 위치를 찍어줍니다.
+                    let targetX = current.x + dx * predictionFactor;
+                    let targetY = current.y + dy * predictionFactor;
 
-                        ctx.beginPath();
-                        ctx.arc(predX, predY, 4 + step * 0.3, 0, 2 * Math.PI);
-                        ctx.fillStyle = `rgba(255, 0, 0, ${1 - step / (predictionSteps + 2)})`;
-                        ctx.fill();
-                    }
+                    // 화면 밖으로 나가지 않게 보정
+                    targetX = Math.max(20, Math.min(canvas.width - 20, targetX));
+                    targetY = Math.max(20, Math.min(canvas.height - 20, targetY));
+
+                    // 4. 조준을 위한 붉은색 과녁(타겟) 표시
+                    ctx.beginPath();
+                    ctx.arc(targetX, targetY, 22, 0, 2 * Math.PI);
+                    ctx.fillStyle = 'rgba(255, 0, 0, 0.6)';
+                    ctx.fill();
+                    ctx.lineWidth = 3;
+                    ctx.strokeStyle = '#FFFFFF'; // 흰색 테두리로 눈에 띄게
+                    ctx.stroke();
+
+                    // 과녁 중심 십자 표시
+                    ctx.beginPath();
+                    ctx.moveTo(targetX - 8, targetY); ctx.lineTo(targetX + 8, targetY);
+                    ctx.moveTo(targetX, targetY - 8); ctx.lineTo(targetX, targetY + 8);
+                    ctx.strokeStyle = '#FFFFFF';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
                 }
             }
         }
 
-        // 실행 시작
         startCamera().then(() => {
             requestAnimationFrame(processVideo);
         });
