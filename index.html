@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>사물 지정 자동 줌 중계 시스템</title>
+    <title>고화질 사물 자동 줌 중계 시스템</title>
     <style>
         body {
             margin: 0;
@@ -27,25 +27,32 @@
         }
         .controls {
             margin-bottom: 8px;
+            display: flex;
+            gap: 8px;
         }
         button {
             background-color: #00FFCC;
             color: #111;
             font-weight: bold;
             border: none;
-            padding: 8px 16px;
-            font-size: 0.9rem;
+            padding: 8px 14px;
+            font-size: 0.85rem;
             border-radius: 20px;
             cursor: pointer;
             box-shadow: 0 4px 10px rgba(0,255,204,0.3);
+        }
+        button#cancelBtn {
+            background-color: #FF5555;
+            color: #fff;
+            display: none; /* 평소에는 숨김 */
         }
         button:active {
             transform: scale(0.95);
         }
         .viewport {
             position: relative;
-            width: 640px;
-            height: 480px;
+            width: 720px;
+            height: 540px;
             max-width: 95vw;
             max-height: 70vh;
             box-shadow: 0 10px 25px rgba(0,0,0,0.8);
@@ -85,15 +92,16 @@
 </head>
 <body>
 
-    <h2>사물 지정 자동 줌 중계</h2>
+    <h2>고화질 사물 지정 자동 줌 중계</h2>
     <div class="controls">
-        <button id="switchCameraBtn">카메라 전환 (전면/후면)</button>
+        <button id="switchCameraBtn">카메라 전환</button>
+        <button id="cancelBtn">추적 취소 (기본화면)</button>
     </div>
     <div class="viewport">
         <div class="badge" id="statusBadge">터치하여 사물 선택</div>
         <canvas id="displayCanvas"></canvas>
     </div>
-    <div class="info">화면에서 따라가고 싶은 사물을 터치하세요.</div>
+    <div class="info">화면을 터치해 사물을 지정하세요. 상단의 '추적 취소'로 언제든 기본 화면으로 돌아갈 수 있습니다.</div>
 
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="processingCanvas"></canvas>
@@ -105,6 +113,7 @@
         const dispCanvas = document.getElementById('displayCanvas');
         const dispCtx = dispCanvas.getContext('2d');
         const switchBtn = document.getElementById('switchCameraBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
         const statusBadge = document.getElementById('statusBadge');
 
         let currentStream = null;
@@ -113,8 +122,8 @@
         let targetColor = null;
         let trackedObject = null;
 
-        let currentCamX = 320;
-        let currentCamY = 240;
+        let currentCamX = 640;
+        let currentCamY = 360;
         let currentZoom = 1.0;
 
         async function startCamera() {
@@ -124,22 +133,21 @@
 
             let constraints = {
                 video: {
-                    width: { ideal: 640 },
-                    height: { ideal: 480 },
+                    width: { ideal: 1280 }, // 고화질 HD 해상도 요청
+                    height: { ideal: 720 },
                     facingMode: useFrontCamera ? 'user' : { exact: 'environment' }
                 }
             };
 
             try {
-                // 후면 카메라가 없는 기기일 경우 에러를 잡기 위해 시도
                 currentStream = await navigator.mediaDevices.getUserMedia(constraints);
             } catch (err) {
-                console.warn("후면 카메라를 불러오지 못했습니다. 전면 카메라로 대체합니다.", err);
+                console.warn("후면 카메라 실행 실패, 전면으로 대체", err);
                 useFrontCamera = true;
                 constraints = {
                     video: {
-                        width: { ideal: 640 },
-                        height: { ideal: 480 },
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
                         facingMode: 'user'
                     }
                 };
@@ -154,12 +162,17 @@
             video.srcObject = currentStream;
             return new Promise((resolve) => {
                 video.onloadedmetadata = () => {
-                    procCanvas.width = video.videoWidth;
-                    procCanvas.height = video.videoHeight;
-                    dispCanvas.width = video.videoWidth;
-                    dispCanvas.height = video.videoHeight;
-                    currentCamX = video.videoWidth / 2;
-                    currentCamY = video.videoHeight / 2;
+                    // 실제 비디오 해상도 반영 (고화질)
+                    const vWidth = video.videoWidth || 1280;
+                    const vHeight = video.videoHeight || 720;
+
+                    procCanvas.width = vWidth;
+                    procCanvas.height = vHeight;
+                    dispCanvas.width = vWidth;
+                    dispCanvas.height = vHeight;
+
+                    currentCamX = vWidth / 2;
+                    currentCamY = vHeight / 2;
                     resolve();
                 };
             });
@@ -167,12 +180,23 @@
 
         switchBtn.addEventListener('click', async () => {
             useFrontCamera = !useFrontCamera;
-            targetColor = null;
-            trackedObject = null;
-            statusBadge.innerText = "터치하여 사물 선택";
-            statusBadge.style.background = "rgba(0, 255, 204, 0.8)";
+            resetTracking();
             await startCamera();
         });
+
+        // 추적 취소 버튼 기능
+        cancelBtn.addEventListener('click', () => {
+            resetTracking();
+        });
+
+        function resetTracking() {
+            targetColor = null;
+            trackedObject = null;
+            currentZoom = 1.0;
+            statusBadge.innerText = "터치하여 사물 선택";
+            statusBadge.style.background = "rgba(0, 255, 204, 0.8)";
+            cancelBtn.style.display = "none"; // 취소 버튼 숨김
+        }
 
         function handleTouchOrClick(clientX, clientY) {
             const rect = dispCanvas.getBoundingClientRect();
@@ -187,7 +211,7 @@
             const clickX = viewX + (clientX - rect.left) * scaleX * (viewW / dispCanvas.width);
             const clickY = viewY + (clientY - rect.top) * scaleY * (viewH / dispCanvas.height);
 
-            const sampleSize = 5;
+            const sampleSize = 6;
             const startX = Math.max(0, Math.floor(clickX - sampleSize));
             const startY = Math.max(0, Math.floor(clickY - sampleSize));
             const pWidth = sampleSize * 2;
@@ -208,6 +232,7 @@
 
             statusBadge.innerText = "● TRACKING ACTIVE";
             statusBadge.style.background = "rgba(255, 0, 0, 0.8)";
+            cancelBtn.style.display = "inline-block"; // 취소 버튼 표시
         }
 
         dispCanvas.addEventListener('click', (e) => {
@@ -239,15 +264,15 @@
             if (targetColor && trackedObject) {
                 let sumX = 0, sumY = 0, count = 0;
                 const colorThreshold = 75;
-                const searchRadius = 120;
+                const searchRadius = 180; // 고화질에 맞춰 탐색 반경 확대
 
                 const startX = Math.max(0, Math.floor(trackedObject.x - searchRadius));
                 const endX = Math.min(width, Math.floor(trackedObject.x + searchRadius));
                 const startY = Math.max(0, Math.floor(trackedObject.y - searchRadius));
                 const endY = Math.min(height, Math.floor(trackedObject.y + searchRadius));
 
-                for (let y = startY; y < endY; y += 3) {
-                    for (let x = startX; x < endX; x += 3) {
+                for (let y = startY; y < endY; y += 4) {
+                    for (let x = startX; x < endX; x += 4) {
                         let idx = (y * width + x) * 4;
                         let r = data[idx];
                         let g = data[idx + 1];
@@ -262,15 +287,15 @@
                     }
                 }
 
-                if (count > 15) {
+                if (count > 20) {
                     targetX = sumX / count;
                     targetY = sumY / count;
                     trackedObject = { x: targetX, y: targetY };
-                    targetZoom = 2.0;
+                    targetZoom = 2.2; // 고화질 상태에서 깔끔하게 확대
                 } else {
                     targetX = trackedObject.x;
                     targetY = trackedObject.y;
-                    targetZoom = 2.0;
+                    targetZoom = 2.2;
                 }
             } else {
                 targetX = width / 2;
@@ -298,7 +323,7 @@
         }
 
         startCamera().then(() => {
-            requestAnimationFrame(processFrame);
+            requestAnimationFrame(processVideo);
         });
     </script>
 </body>
