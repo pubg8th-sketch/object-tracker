@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>물체 예측 및 투사 지점 타겟팅</title>
+    <title>AI 스마트 자동 줌 중계 시스템</title>
     <style>
         body {
             margin: 0;
             padding: 0;
-            background-color: #111;
+            background-color: #0b0b0b;
             color: #fff;
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             display: flex;
@@ -16,86 +16,111 @@
             align-items: center;
             justify-content: center;
             min-height: 100vh;
-            touch-action: manipulation;
+            overflow: hidden;
         }
         h2 {
-            margin-bottom: 5px;
-            font-size: 1.3rem;
-            color: #4CAF50;
-            text-align: center;
+            margin: 10px 0 5px 0;
+            font-size: 1.2rem;
+            color: #FFD700;
+            text-shadow: 0 0 5px rgba(255,215,0,0.5);
         }
         .controls {
             margin-bottom: 10px;
         }
         button {
-            background-color: #4CAF50;
-            color: white;
+            background-color: #FFD700;
+            color: #111;
+            font-weight: bold;
             border: none;
-            padding: 10px 20px;
-            font-size: 1rem;
-            border-radius: 6px;
+            padding: 8px 16px;
+            font-size: 0.9rem;
+            border-radius: 20px;
             cursor: pointer;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            box-shadow: 0 4px 10px rgba(255,215,0,0.3);
         }
         button:active {
-            background-color: #388E3C;
+            transform: scale(0.95);
         }
-        .container {
+        .viewport {
             position: relative;
-            box-shadow: 0 8px 16px rgba(0,0,0,0.5);
-            border-radius: 8px;
+            width: 640px;
+            height: 480px;
+            max-width: 95vw;
+            max-height: 70vh;
+            box-shadow: 0 10px 25px rgba(0,0,0,0.8);
+            border-radius: 12px;
             overflow: hidden;
             border: 2px solid #333;
+            background: #000;
         }
-        video, canvas {
-            display: block;
-            width: 100%;
-            max-width: 640px;
-            height: auto;
-        }
-        canvas {
-            position: absolute;
-            top: 0;
-            left: 0;
+        /* 메인 화면 캔버스 */
+        #displayCanvas {
             width: 100%;
             height: 100%;
+            display: block;
+        }
+        /* 연산을 위한 백그라운드 비디오/캔버스 (숨김) */
+        video, #processingCanvas {
+            display: none;
+        }
+        .badge {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            background: rgba(255, 0, 0, 0.8);
+            color: white;
+            padding: 4px 8px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            border-radius: 4px;
+            letter-spacing: 1px;
+            animation: blink 1.5s infinite;
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
         }
         .info {
             margin-top: 10px;
-            font-size: 0.9rem;
-            color: #aaa;
+            font-size: 0.85rem;
+            color: #888;
             text-align: center;
-            padding: 0 15px;
         }
     </style>
 </head>
 <body>
 
-    <h2>공 던지기 예측 타겟팅 시스템</h2>
+    <h2>방송 중계 스타일 스마트 자동 줌</h2>
     <div class="controls">
         <button id="switchCameraBtn">카메라 전환 (전면/후면)</button>
     </div>
-    <div class="container" id="videoContainer">
-        <video id="webcam" autoplay playsinline muted></video>
-        <canvas id="outputCanvas"></canvas>
+    <div class="viewport">
+        <div class="badge">● AUTO TRACKING</div>
+        <canvas id="displayCanvas"></canvas>
     </div>
-    <div class="info">추적할 물체를 <strong>터치</strong>하세요! (초록색: 현재 물체 / <strong>빨간색 큰 타겟: 공을 던져 맞출 곳</strong>)</div>
+    <div class="info">움직이는 물체/사람을 자동으로 따라가며 크롭 및 줌인합니다.</div>
+
+    <!-- 비공개 연산용 엘리먼트 -->
+    <video id="webcam" autoplay playsinline muted></video>
+    <canvas id="processingCanvas"></canvas>
 
     <script>
         const video = document.getElementById('webcam');
-        const canvas = document.getElementById('outputCanvas');
-        const ctx = canvas.getContext('2d');
+        const procCanvas = document.getElementById('processingCanvas');
+        const procCtx = procCanvas.getContext('2d');
+        const dispCanvas = document.getElementById('displayCanvas');
+        const dispCtx = dispCanvas.getContext('2d');
         const switchBtn = document.getElementById('switchCameraBtn');
-        const container = document.getElementById('videoContainer');
 
         let currentStream = null;
         let useFrontCamera = true;
-        
-        let targetColor = null; 
-        let trackedObject = null; 
-        let historyPoints = []; 
+        let prevGray = null;
 
-        // 카메라 시작 함수
+        // 부드러운 카메라 이동을 위한 보정(Smoothening) 변수
+        let currentCamX = 320;
+        let currentCamY = 240;
+        let currentZoom = 1.0;
+
         async function startCamera() {
             if (currentStream) {
                 currentStream.getTracks().forEach(track => track.stop());
@@ -114,183 +139,121 @@
                 video.srcObject = currentStream;
                 return new Promise((resolve) => {
                     video.onloadedmetadata = () => {
-                        canvas.width = video.videoWidth;
-                        canvas.height = video.videoHeight;
+                        procCanvas.width = video.videoWidth;
+                        procCanvas.height = video.videoHeight;
+                        dispCanvas.width = video.videoWidth;
+                        dispCanvas.height = video.videoHeight;
+                        currentCamX = video.videoWidth / 2;
+                        currentCamY = video.videoHeight / 2;
                         resolve();
                     };
                 });
             } catch (err) {
-                alert("카메라 권한이 없거나 지원하지 않는 기기입니다.");
-                console.error(err);
+                alert("카메라 권한을 얻을 수 없습니다.");
             }
         }
 
-        // 카메라 전환 버튼
         switchBtn.addEventListener('click', async () => {
             useFrontCamera = !useFrontCamera;
-            targetColor = null; 
-            trackedObject = null;
-            historyPoints = [];
+            prevGray = null;
             await startCamera();
         });
 
-        // 터치 및 클릭 위치 처리 (색상 추출 오차 보완을 위해 주변 3x3 평균 색상 추출)
-        function handleTouchOrClick(clientX, clientY) {
-            const rect = canvas.getBoundingClientRect();
-            const scaleX = canvas.width / rect.width;
-            const scaleY = canvas.height / rect.height;
-            
-            const clickX = (clientX - rect.left) * scaleX;
-            const clickY = (clientY - rect.top) * scaleY;
-
-            // 주변 영역의 색상을 평균내어 인식률 향상
-            const sampleSize = 5;
-            const startX = Math.max(0, Math.floor(clickX - sampleSize));
-            const startY = Math.max(0, Math.floor(clickY - sampleSize));
-            const pWidth = sampleSize * 2;
-            const pHeight = sampleSize * 2;
-
-            const pixelData = ctx.getImageData(startX, startY, pWidth, pHeight).data;
-            let rSum = 0, gSum = 0, bSum = 0, total = 0;
-
-            for (let i = 0; i < pixelData.length; i += 4) {
-                rSum += pixelData[i];
-                gSum += pixelData[i+1];
-                bSum += pixelData[i+2];
-                total++;
-            }
-
-            targetColor = { 
-                r: rSum / total, 
-                g: gSum / total, 
-                b: bSum / total 
-            };
-            
-            trackedObject = { x: clickX, y: clickY };
-            historyPoints = [{ x: clickX, y: clickY }];
-        }
-
-        container.addEventListener('click', (e) => {
-            handleTouchOrClick(e.clientX, e.clientY);
-        });
-
-        container.addEventListener('touchstart', (e) => {
-            if (e.touches.length > 0) {
-                const touch = e.touches[0];
-                handleTouchOrClick(touch.clientX, touch.clientY);
-                e.preventDefault();
-            }
-        }, { passive: false });
-
-        // 비디오 분석 및 추적 루프
-        function processVideo() {
+        function processFrame() {
             if (video.paused || video.ended) return;
 
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const width = procCanvas.width;
+            const height = procCanvas.height;
 
-            if (targetColor) {
-                const frame = ctx.getImageData(0, 0, canvas.width, canvas.height);
-                const data = frame.data;
-                const width = canvas.width;
-                const height = canvas.height;
+            // 원본 비디오를 처리용 캔버스에 그리기
+            procCtx.drawImage(video, 0, 0, width, height);
+            const frame = procCtx.getImageData(0, 0, width, height);
+            const data = frame.data;
 
+            // 프레임 차분법을 위한 흑백(Gray Scale) 데이터 생성 (4픽셀 축소 샘플링)
+            const gray = new Uint8Array((width * height) / 16);
+            for (let y = 0, gIdx = 0; y < height; y += 4) {
+                for (let x = 0; x < width; x += 4) {
+                    let idx = (y * width + x) * 4;
+                    gray[gIdx++] = (data[idx] * 0.299 + data[idx + 1] * 0.587 + data[idx + 2] * 0.114);
+                }
+            }
+
+            let targetX = currentCamX;
+            let targetY = currentCamY;
+            let targetZoom = 1.0;
+
+            if (prevGray) {
                 let sumX = 0, sumY = 0, count = 0;
-                // [인식률 개선] 허용 오차 범위를 넓혀서 조명 변화나 흔들림에도 잘 잡히도록 함
-                const colorThreshold = 85; 
+                let minX = width, maxX = 0, minY = height, maxY = 0;
+                const threshold = 25; // 움직임 임계값
 
-                // 탐색 반경을 넓혀서 물체가 빠르게 움직여도 놓치지 않도록 함
-                const searchRadius = 140;
-                const startX = trackedObject ? Math.max(0, Math.floor(trackedObject.x - searchRadius)) : 0;
-                const endX = trackedObject ? Math.min(width, Math.floor(trackedObject.x + searchRadius)) : width;
-                const startY = trackedObject ? Math.max(0, Math.floor(trackedObject.y - searchRadius)) : 0;
-                const endY = trackedObject ? Math.min(height, Math.floor(trackedObject.y + searchRadius)) : height;
-
-                for (let y = startY; y < endY; y += 4) {
-                    for (let x = startX; x < endX; x += 4) {
-                        let idx = (y * width + x) * 4;
-                        let r = data[idx];
-                        let g = data[idx + 1];
-                        let b = data[idx + 2];
-
-                        let diff = Math.abs(r - targetColor.r) + Math.abs(g - targetColor.g) + Math.abs(b - targetColor.b);
-                        if (diff < colorThreshold) {
+                for (let y = 0, gIdx = 0; y < height; y += 4) {
+                    for (let x = 0; x < width; x += 4) {
+                        let diff = Math.abs(gray[gIdx] - prevGray[gIdx]);
+                        if (diff > threshold) {
                             sumX += x;
                             sumY += y;
                             count++;
+                            if (x < minX) minX = x;
+                            if (x > maxX) maxX = x;
+                            if (y < minY) minY = y;
+                            if (y > maxY) maxY = y;
                         }
+                        gIdx++;
                     }
                 }
 
-                // [인식률 개선] 최소 감지 픽셀 수를 낮추어 작은 물체나 일부가 가려져도 추적 유지
-                if (count > 10) {
-                    let cx = sumX / count;
-                    let cy = sumY / count;
-                    trackedObject = { x: cx, y: cy };
+                // 의미 있는 움직임이 감지된 경우
+                if (count > 30) {
+                    targetX = sumX / count;
+                    targetY = sumY / count;
 
-                    historyPoints.push({ x: cx, y: cy });
-                    if (historyPoints.length > 10) {
-                        historyPoints.shift();
-                    }
-                }
-            }
-
-            drawVisualizations();
-            requestAnimationFrame(processVideo);
-        }
-
-        // 공을 던져 맞출 곳(예상 낙리지점)에 큰 타겟점 그리기
-        function drawVisualizations() {
-            if (historyPoints.length > 0) {
-                let current = historyPoints[historyPoints.length - 1];
-
-                // 1. 현재 물체 위치 (초록색 원)
-                ctx.beginPath();
-                ctx.arc(current.x, current.y, 14, 0, 2 * Math.PI);
-                ctx.strokeStyle = '#00FF00';
-                ctx.lineWidth = 3;
-                ctx.stroke();
-
-                if (historyPoints.length >= 3) {
-                    // 2. 이동 속도 및 방향 벡터 계산 (최근 이동 평균)
-                    let dx = 0, dy = 0;
-                    for (let i = 1; i < historyPoints.length; i++) {
-                        dx += historyPoints[i].x - historyPoints[i-1].x;
-                        dy += historyPoints[i].y - historyPoints[i-1].y;
-                    }
-                    dx /= (historyPoints.length - 1);
-                    dy /= (historyPoints.length - 1);
-
-                    // 3. [공 던지기 타겟] 물체가 날아갈 미래 예상 지점 (더 멀리 앞서서 예측)
-                    const predictionFactor = 12; // 이 값을 키우면 더 미래의 위치를 찍어줍니다.
-                    let targetX = current.x + dx * predictionFactor;
-                    let targetY = current.y + dy * predictionFactor;
-
-                    // 화면 밖으로 나가지 않게 보정
-                    targetX = Math.max(20, Math.min(canvas.width - 20, targetX));
-                    targetY = Math.max(20, Math.min(canvas.height - 20, targetY));
-
-                    // 4. 조준을 위한 붉은색 과녁(타겟) 표시
-                    ctx.beginPath();
-                    ctx.arc(targetX, targetY, 22, 0, 2 * Math.PI);
-                    ctx.fillStyle = 'rgba(255, 0, 0, 0.6)';
-                    ctx.fill();
-                    ctx.lineWidth = 3;
-                    ctx.strokeStyle = '#FFFFFF'; // 흰색 테두리로 눈에 띄게
-                    ctx.stroke();
-
-                    // 과녁 중심 십자 표시
-                    ctx.beginPath();
-                    ctx.moveTo(targetX - 8, targetY); ctx.lineTo(targetX + 8, targetY);
-                    ctx.moveTo(targetX, targetY - 8); ctx.lineTo(targetX, targetY + 8);
-                    ctx.strokeStyle = '#FFFFFF';
-                    ctx.lineWidth = 2;
-                    ctx.stroke();
+                    // 움직임 영역 크기에 맞춰 줌인 수치 자동 계산 (최대 2.2배 줌)
+                    let motionWidth = maxX - minX;
+                    let motionHeight = maxY - minY;
+                    let size = Math.max(motionWidth, motionHeight);
+                    
+                    targetZoom = Math.min(2.2, Math.max(1.3, width / (size * 1.6)));
+                } else {
+                    // 움직임이 없으면 천천히 기본 화면(줌 1.0, 중앙)으로 복귀
+                    targetX = width / 2;
+                    targetY = height / 2;
+                    targetZoom = 1.0;
                 }
             }
+
+            prevGray = gray;
+
+            // [방송 중계 효과] 화면이 뚝뚝 끊기지 않고 부드럽게 사물을 따라가도록 보정 (LERP)
+            const ease = 0.08; 
+            currentCamX += (targetX - currentCamX) * ease;
+            currentCamY += (targetY - currentCamY) * ease;
+            currentZoom += (targetZoom - currentZoom) * ease;
+
+            // 화면을 벗어나지 않도록 클리핑 범위 제한
+            let cropW = width / currentZoom;
+            let cropH = height / currentZoom;
+            let cropX = currentCamX - cropW / 2;
+            let cropY = currentCamY - cropH / 2;
+
+            cropX = Math.max(0, Math.min(width - cropW, cropX));
+            cropY = Math.max(0, Math.min(height - cropH, cropY));
+
+            // 최종 캔버스에 줌인된 영상 크롭해서 출력
+            dispCtx.clearRect(0, 0, width, height);
+            dispCtx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, width, height);
+
+            // 타겟 조준선 시각 효과 (중계 화면 느낌)
+            dispCtx.strokeStyle = 'rgba(255, 215, 0, 0.4)';
+            dispCtx.lineWidth = 1.5;
+            dispCtx.strokeRect(width / 2 - 40, height / 2 - 40, 80, 80);
+
+            requestAnimationFrame(processFrame);
         }
 
         startCamera().then(() => {
-            requestAnimationFrame(processVideo);
+            requestAnimationFrame(processFrame);
         });
     </script>
 </body>
