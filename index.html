@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>지정 사물 자동 줌 중계 시스템</title>
+    <title>사물 지정 자동 줌 중계 시스템</title>
     <style>
         body {
             margin: 0;
@@ -23,19 +23,20 @@
             margin: 10px 0 5px 0;
             font-size: 1.2rem;
             color: #00FFCC;
-            text-shadow: 0 0 5px rgba(0,255,204,0.5);
             text-align: center;
         }
         .controls {
             margin-bottom: 8px;
+            display: flex;
+            gap: 8px;
         }
         button {
             background-color: #00FFCC;
             color: #111;
             font-weight: bold;
             border: none;
-            padding: 8px 16px;
-            font-size: 0.9rem;
+            padding: 8px 14px;
+            font-size: 0.85rem;
             border-radius: 20px;
             cursor: pointer;
             box-shadow: 0 4px 10px rgba(0,255,204,0.3);
@@ -89,15 +90,14 @@
 
     <h2>사물 지정 자동 줌 중계</h2>
     <div class="controls">
-        <button id="switchCameraBtn">카메라 전환 (전면/후면)</button>
+        <button id="switchCameraBtn">카메라 전환</button>
     </div>
     <div class="viewport">
         <div class="badge" id="statusBadge">터치하여 사물 선택</div>
         <canvas id="displayCanvas"></canvas>
     </div>
-    <div class="info">화면에서 따라가고 싶은 <strong>사물을 터치</strong>하세요. (후면 카메라 우선 연결)</div>
+    <div class="info">화면에서 따라가고 싶은 사물을 터치하세요.</div>
 
-    <!-- 비공개 연산용 엘리먼트 -->
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="processingCanvas"></canvas>
 
@@ -111,46 +111,75 @@
         const statusBadge = document.getElementById('statusBadge');
 
         let currentStream = null;
-        let useFrontCamera = false; // ★ 기본값을 '후면(false)'으로 변경하여 시작 시 후면을 우선 호출
+        let useFrontCamera = false; // 기본값을 후면(false)으로 우선 시도
+        let videoDevices = [];
+        let currentDeviceIndex = 0;
 
-        let targetColor = null; 
-        let trackedObject = null; 
+        let targetColor = null;
+        let trackedObject = null;
 
         let currentCamX = 320;
         let currentCamY = 240;
         let currentZoom = 1.0;
+
+        // 기기에서 사용 가능한 카메라 장치 목록 가져오기
+        async function getCameraDevices() {
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                videoDevices = devices.filter(device => device.kind === 'videoinput');
+                console.log("발견된 카메라 목록:", videoDevices);
+            } catch (err) {
+                console.error("카메라 장치 목록을 가져오지 못했습니다.", err);
+            }
+        }
 
         async function startCamera() {
             if (currentStream) {
                 currentStream.getTracks().forEach(track => track.stop());
             }
 
-            // 기기에서 사용 가능한 카메라 장치 목록을 먼저 조회하여 후면 카메라를 강제로 찾습니다.
-            let videoConstraints = {
-                width: { ideal: 640 },
-                height: { ideal: 480 },
-                facingMode: useFrontCamera ? 'user' : { exact: 'environment' } // 후면 카메라 강제 지정 방식 수정
-            };
+            let constraints;
+
+            // 기기 목록이 있고 후면/전면 명시가 확실할 때
+            if (videoDevices.length > 0) {
+                // facingMode 대신 deviceId를 직접 지정하거나 순서대로 변경
+                let targetDevice = videoDevices[currentDeviceIndex];
+                constraints = {
+                    video: {
+                        deviceId: targetDevice ? { exact: targetDevice.deviceId } : undefined,
+                        width: { ideal: 640 },
+                        height: { ideal: 480 }
+                    }
+                };
+            } else {
+                // 기본 제약 조건 (environment: 후면, user: 전면)
+                constraints = {
+                    video: {
+                        width: { ideal: 640 },
+                        height: { ideal: 480 },
+                        facingMode: useFrontCamera ? 'user' : { exact: 'environment' }
+                    }
+                };
+            }
 
             try {
-                // 먼저 exact 방식으로 후면 카메라를 호출 시도
-                currentStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
-            } catch (err1) {
-                console.warn("Exact facingMode 실패, 일반 모드로 재시도합니다.", err1);
+                currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+            } catch (e) {
+                console.warn("정밀 제약 조건 실패, 유연한 모드로 재시도합니다.", e);
+                // 강제 옵션에서 실패할 경우 일반 모드로 재시도
                 try {
-                    // 구형 기기나 태블릿 브라우저 호환성을 위해 일반 모드로 재시도
-                    videoConstraints.facingMode = useFrontCamera ? 'user' : 'environment';
-                    currentStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
-                } catch (err2) {
-                    console.warn("facingMode 설정 실패, 기본 카메라로 연결합니다.", err2);
-                    try {
-                        // 모든 제약 조건을 풀고 기본 카메라라도 가져옴
-                        currentStream = await navigator.mediaDevices.getUserMedia({ video: true });
-                    } catch (err3) {
-                        alert("카메라를 실행할 수 없습니다. 권한을 확인해주세요.");
-                        console.error(err3);
-                        return;
-                    }
+                    constraints = {
+                        video: {
+                            width: { ideal: 640 },
+                            height: { ideal: 480 },
+                            facingMode: useFrontCamera ? 'user' : 'environment'
+                        }
+                    };
+                    currentStream = await navigator.mediaDevices.getUserMedia(constraints);
+                } catch (err) {
+                    alert("카메라를 실행할 수 없습니다. 카메라 권한을 확인해주세요.");
+                    console.error(err);
+                    return;
                 }
             }
 
@@ -168,15 +197,22 @@
             });
         }
 
+        // 카메라 전환 버튼 (목록이 있으면 순회, 없으면 토글)
         switchBtn.addEventListener('click', async () => {
-            useFrontCamera = !useFrontCamera;
             targetColor = null;
             trackedObject = null;
-            statusBadge.innerText = useFrontCamera ? "전면 카메라" : "후면 카메라";
+            statusBadge.innerText = "터치하여 사물 선택";
             statusBadge.style.background = "rgba(0, 255, 204, 0.8)";
+
+            if (videoDevices.length > 1) {
+                currentDeviceIndex = (currentDeviceIndex + 1) % videoDevices.length;
+            } else {
+                useFrontCamera = !useFrontCamera;
+            }
             await startCamera();
         });
 
+        // 사물 터치 지정
         function handleTouchOrClick(clientX, clientY) {
             const rect = dispCanvas.getBoundingClientRect();
             const scaleX = dispCanvas.width / rect.width;
@@ -213,18 +249,15 @@
             statusBadge.style.background = "rgba(255, 0, 0, 0.8)";
         }
 
-        dispCanvas.addEventListener('click', (e) => {
-            handleTouchOrClick(e.clientX, e.clientY);
-        });
-
+        dispCanvas.addEventListener('click', (e) => handleTouchOrClick(e.clientX, e.clientY));
         dispCanvas.addEventListener('touchstart', (e) => {
             if (e.touches.length > 0) {
-                const touch = e.touches[0];
-                handleTouchOrClick(touch.clientX, touch.clientY);
+                handleTouchOrClick(e.touches[0].clientX, e.touches[0].clientY);
                 e.preventDefault();
             }
         }, { passive: false });
 
+        // 메인 추적 루프
         function processFrame() {
             if (video.paused || video.ended) return;
 
@@ -241,8 +274,8 @@
 
             if (targetColor && trackedObject) {
                 let sumX = 0, sumY = 0, count = 0;
-                const colorThreshold = 75; 
-                const searchRadius = 120;  
+                const colorThreshold = 75;
+                const searchRadius = 120;
 
                 const startX = Math.max(0, Math.floor(trackedObject.x - searchRadius));
                 const endX = Math.min(width, Math.floor(trackedObject.x + searchRadius));
@@ -269,7 +302,7 @@
                     targetX = sumX / count;
                     targetY = sumY / count;
                     trackedObject = { x: targetX, y: targetY };
-                    targetZoom = 2.0; 
+                    targetZoom = 2.0;
                 } else {
                     targetX = trackedObject.x;
                     targetY = trackedObject.y;
@@ -300,9 +333,22 @@
             requestAnimationFrame(processFrame);
         }
 
-        startCamera().then(() => {
+        // 초기 실행 시 카메라 장치 목록을 먼저 조회한 후 카메라 구동
+        async function init() {
+            await getCameraDevices();
+            // 후면 카메라가 목록에 있다면 첫 번째로 지정
+            if (videoDevices.length > 1) {
+                // 보통 후면 카메라는 목록의 두 번째나 'back'이 포함된 장치일 확률이 높음
+                const backIndex = videoDevices.findIndex(d => d.label.toLowerCase().find(k => k.includes('back') || k.includes('후면') || k.includes('rear')));
+                if (backIndex !== -1) {
+                    currentDeviceIndex = backIndex;
+                }
+            }
+            await startCamera();
             requestAnimationFrame(processFrame);
-        });
+        }
+
+        init();
     </script>
 </body>
 </html>
