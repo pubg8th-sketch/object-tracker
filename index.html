@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
-    <title>드래그 선택 및 자동 줌 중계 시스템</title>
+    <title>지정 사물 자동 줌 중계 시스템</title>
     <style>
         body {
             margin: 0;
@@ -17,27 +17,28 @@
             justify-content: center;
             min-height: 100vh;
             overflow: hidden;
-            touch-action: none;
+            touch-action: manipulation;
         }
         h2 {
             margin: 10px 0 5px 0;
             font-size: 1.2rem;
-            color: #4CAF50;
+            color: #00FFCC;
+            text-shadow: 0 0 5px rgba(0,255,204,0.5);
             text-align: center;
         }
         .controls {
             margin-bottom: 8px;
         }
         button {
-            background-color: #4CAF50;
-            color: white;
+            background-color: #00FFCC;
+            color: #111;
             font-weight: bold;
             border: none;
             padding: 8px 16px;
             font-size: 0.9rem;
             border-radius: 20px;
             cursor: pointer;
-            box-shadow: 0 4px 10px rgba(76,175,80,0.3);
+            box-shadow: 0 4px 10px rgba(0,255,204,0.3);
         }
         button:active {
             transform: scale(0.95);
@@ -53,36 +54,50 @@
             overflow: hidden;
             border: 2px solid #333;
             background: #000;
-            cursor: crosshair;
         }
         #displayCanvas {
             width: 100%;
             height: 100%;
             display: block;
+            cursor: crosshair;
         }
         video, #processingCanvas {
             display: none;
         }
+        .badge {
+            position: absolute;
+            top: 12px;
+            left: 12px;
+            background: rgba(0, 255, 204, 0.8);
+            color: #000;
+            padding: 4px 8px;
+            font-size: 0.75rem;
+            font-weight: bold;
+            border-radius: 4px;
+            letter-spacing: 1px;
+        }
         .info {
-            margin-top: 10px;
+            margin-top: 8px;
             font-size: 0.85rem;
-            color: #aaa;
+            color: #888;
             text-align: center;
-            padding: 0 15px;
+            padding: 0 10px;
         }
     </style>
 </head>
 <body>
 
-    <h2>사물 드래그 선택 & 자동 줌 중계</h2>
+    <h2>사물 지정 자동 줌 중계</h2>
     <div class="controls">
         <button id="switchCameraBtn">카메라 전환 (전면/후면)</button>
     </div>
-    <div class="viewport" id="viewContainer">
+    <div class="viewport">
+        <div class="badge" id="statusBadge">터치하여 사물 선택</div>
         <canvas id="displayCanvas"></canvas>
     </div>
-    <div class="info">화면에서 추적할 사물을 <strong>손가락으로 드래그하여 박스</strong>로 지정하세요!</div>
+    <div class="info">화면에서 따라가고 싶은 <strong>사물을 터치</strong>하세요. 해당 사물을 중심으로 자동 줌인됩니다.</div>
 
+    <!-- 비공개 연산용 엘리먼트 -->
     <video id="webcam" autoplay playsinline muted></video>
     <canvas id="processingCanvas"></canvas>
 
@@ -93,19 +108,15 @@
         const dispCanvas = document.getElementById('displayCanvas');
         const dispCtx = dispCanvas.getContext('2d');
         const switchBtn = document.getElementById('switchCameraBtn');
-        const viewContainer = document.getElementById('viewContainer');
+        const statusBadge = document.getElementById('statusBadge');
 
         let currentStream = null;
         let useFrontCamera = true;
 
-        // 드래그 선택 관련 변수
-        let isDragging = false;
-        let startX = 0, startY = 0;
-        let endX = 0, endY = 0;
-        let selectionBox = null; // {x, y, w, h}
-        let targetColor = null;  // 선택한 영역의 평균 색상
+        let targetColor = null; // 사용자가 지정한 사물 색상
+        let trackedObject = null; // 현재 지정된 사물 위치 {x, y}
 
-        // 카메라 시점 및 줌 부드러운 보정용 변수
+        // 부드러운 카메라 이동 및 줌을 위한 변수
         let currentCamX = 320;
         let currentCamY = 240;
         let currentZoom = 1.0;
@@ -144,94 +155,65 @@
 
         switchBtn.addEventListener('click', async () => {
             useFrontCamera = !useFrontCamera;
-            selectionBox = null;
             targetColor = null;
+            trackedObject = null;
+            statusBadge.innerText = "터치하여 사물 선택";
+            statusBadge.style.background = "rgba(0, 255, 204, 0.8)";
             await startCamera();
         });
 
-        // --- 마우스 / 터치 드래그 이벤트 처리 ---
-        function getCanvasCoords(clientX, clientY) {
+        // 화면 터치/클릭 시 해당 위치의 사물 색상 추출
+        function handleTouchOrClick(clientX, clientY) {
             const rect = dispCanvas.getBoundingClientRect();
             const scaleX = dispCanvas.width / rect.width;
             const scaleY = dispCanvas.height / rect.height;
-            return {
-                x: (clientX - rect.left) * scaleX,
-                y: (clientY - rect.top) * scaleY
-            };
+
+            // 현재 줌인/크롭된 상태를 고려하여 실제 원본 비디오 좌표 계산
+            const viewW = dispCanvas.width / currentZoom;
+            const viewH = dispCanvas.height / currentZoom;
+            const viewX = currentCamX - viewW / 2;
+            const viewY = currentCamY - viewH / 2;
+
+            const clickX = viewX + (clientX - rect.left) * scaleX * (viewW / dispCanvas.width);
+            const clickY = viewY + (clientY - rect.top) * scaleY * (viewH / dispCanvas.height);
+
+            // 주변 5x5 영역의 평균 색상 추출 (인식률 향상)
+            const sampleSize = 5;
+            const startX = Math.max(0, Math.floor(clickX - sampleSize));
+            const startY = Math.max(0, Math.floor(clickY - sampleSize));
+            const pWidth = sampleSize * 2;
+            const pHeight = sampleSize * 2;
+
+            const pixelData = procCtx.getImageData(startX, startY, pWidth, pHeight).data;
+            let rSum = 0, gSum = 0, bSum = 0, total = 0;
+
+            for (let i = 0; i < pixelData.length; i += 4) {
+                rSum += pixelData[i];
+                gSum += pixelData[i+1];
+                bSum += pixelData[i+2];
+                total++;
+            }
+
+            targetColor = { r: rSum / total, g: gSum / total, b: bSum / total };
+            trackedObject = { x: clickX, y: clickY };
+
+            statusBadge.innerText = "● TRACKING ACTIVE";
+            statusBadge.style.background = "rgba(255, 0, 0, 0.8)";
         }
 
-        viewContainer.addEventListener('mousedown', (e) => {
-            const pos = getCanvasCoords(e.clientX, e.clientY);
-            isDragging = true;
-            startX = pos.x; startY = pos.y;
-            endX = pos.x; endY = pos.y;
+        dispCanvas.addEventListener('click', (e) => {
+            handleTouchOrClick(e.clientX, e.clientY);
         });
 
-        viewContainer.addEventListener('mousemove', (e) => {
-            if (!isDragging) return;
-            const pos = getCanvasCoords(e.clientX, e.clientY);
-            endX = pos.x; endY = pos.y;
-        });
-
-        viewContainer.addEventListener('mouseup', () => {
-            if (!isDragging) return;
-            isDragging = false;
-            finalizeSelection();
-        });
-
-        // 모바일/태블릿 터치 지원
-        viewContainer.addEventListener('touchstart', (e) => {
+        dispCanvas.addEventListener('touchstart', (e) => {
             if (e.touches.length > 0) {
-                const pos = getCanvasCoords(e.touches[0].clientX, e.touches[0].clientY);
-                isDragging = true;
-                startX = pos.x; startY = pos.y;
-                endX = pos.x; endY = pos.y;
+                const touch = e.touches[0];
+                handleTouchOrClick(touch.clientX, touch.clientY);
+                e.preventDefault();
             }
-        });
+        }, { passive: false });
 
-        viewContainer.addEventListener('touchmove', (e) => {
-            if (!isDragging || e.touches.length === 0) return;
-            const pos = getCanvasCoords(e.touches[0].clientX, e.touches[0].clientY);
-            endX = pos.x; endY = pos.y;
-        });
-
-        viewContainer.addEventListener('touchend', () => {
-            if (!isDragging) return;
-            isDragging = false;
-            finalizeSelection();
-        });
-
-        // 드래그가 끝났을 때 선택 영역 설정 및 색상 추출
-        function finalizeSelection() {
-            let x = Math.min(startX, endX);
-            let y = Math.min(startY, endY);
-            let w = Math.abs(endX - startX);
-            let h = Math.abs(endY - startY);
-
-            if (w < 10 || h < 10) return; // 너무 작게 드래그한 경우 무시
-
-            selectionBox = { x, y, w, h };
-
-            // 선택한 영역 안의 평균 색상 추출
-            procCtx.drawImage(video, 0, 0, procCanvas.width, procCanvas.height);
-            const imgData = procCtx.getImageData(x, y, w, h).data;
-            let rSum = 0, gSum = 0, bSum = 0, count = 0;
-
-            for (let i = 0; i < imgData.length; i += 16) { // 샘플링 추출
-                rSum += imgData[i];
-                gSum += imgData[i+1];
-                bSum += imgData[i+2];
-                count++;
-            }
-
-            targetColor = {
-                r: rSum / count,
-                g: gSum / count,
-                b: bSum / count
-            };
-        }
-
-        // --- 메인 렌더링 및 추적 루프 ---
+        // 메인 루프: 지정된 사물 추적 및 자동 줌 처리
         function processFrame() {
             if (video.paused || video.ended) return;
 
@@ -239,72 +221,65 @@
             const height = procCanvas.height;
 
             procCtx.drawImage(video, 0, 0, width, height);
+            const frame = procCtx.getImageData(0, 0, width, height);
+            const data = frame.data;
 
-            let targetX = width / 2;
-            let targetY = height / 2;
+            let targetX = currentCamX;
+            let targetY = currentCamY;
             let targetZoom = 1.0;
 
-            // 사물이 지정되어 있으면 해당 색상을 추적하여 위치 파악
-            if (targetColor && selectionBox) {
-                const frameData = procCtx.getImageData(0, 0, width, height).data;
-                let sumX = 0, sumY = 0, matchCount = 0;
-                let minX = width, maxX = 0, minY = height, maxY = 0;
-                const threshold = 70; // 색상 허용 오차
+            if (targetColor && trackedObject) {
+                let sumX = 0, sumY = 0, count = 0;
+                const colorThreshold = 75; // 색상 오차 허용 범위
+                const searchRadius = 120;  // 사물 주변 탐색 반경
 
-                // 직전 위치 주변을 우선 탐색하여 속도 유지
-                const searchRadius = 150;
-                const cx = selectionBox.x + selectionBox.w / 2;
-                const cy = selectionBox.y + selectionBox.h / 2;
-                const sX = Math.max(0, Math.floor(cx - searchRadius));
-                const eX = Math.min(width, Math.floor(cx + searchRadius));
-                const sY = Math.max(0, Math.floor(cy - searchRadius));
-                const eY = Math.min(height, Math.floor(cy + searchRadius));
+                const startX = Math.max(0, Math.floor(trackedObject.x - searchRadius));
+                const endX = Math.min(width, Math.floor(trackedObject.x + searchRadius));
+                const startY = Math.max(0, Math.floor(trackedObject.y - searchRadius));
+                const endY = Math.min(height, Math.floor(trackedObject.y + searchRadius));
 
-                for (let y = sY; y < eY; y += 4) {
-                    for (let x = sX; x < eX; x += 4) {
+                for (let y = startY; y < endY; y += 3) {
+                    for (let x = startX; x < endX; x += 3) {
                         let idx = (y * width + x) * 4;
-                        let r = frameData[idx];
-                        let g = frameData[idx + 1];
-                        let b = frameData[idx + 2];
+                        let r = data[idx];
+                        let g = data[idx + 1];
+                        let b = data[idx + 2];
 
                         let diff = Math.abs(r - targetColor.r) + Math.abs(g - targetColor.g) + Math.abs(b - targetColor.b);
-                        if (diff < threshold) {
+                        if (diff < colorThreshold) {
                             sumX += x;
                             sumY += y;
-                            matchCount++;
-                            if (x < minX) minX = x;
-                            if (x > maxX) maxX = x;
-                            if (y < minY) minY = y;
-                            if (y > maxY) maxY = y;
+                            count++;
                         }
                     }
                 }
 
-                if (matchCount > 20) {
-                    targetX = sumX / matchCount;
-                    targetY = sumY / matchCount;
-
-                    // 선택된 사물의 크기에 맞춰 줌인 배율 계산 (최대 2.5배)
-                    let boxW = maxX - minX;
-                    let boxH = maxY - minY;
-                    let objSize = Math.max(boxW, boxH, 40);
-                    targetZoom = Math.min(2.5, Math.max(1.2, width / (objSize * 1.8)));
-
-                    // 추적 박스 업데이트
-                    selectionBox.x = minX;
-                    selectionBox.y = minY;
-                    selectionBox.w = boxW;
-                    selectionBox.h = boxH;
+                // 사물을 찾은 경우 위치 업데이트 및 자동 줌인 적용
+                if (count > 15) {
+                    targetX = sumX / count;
+                    targetY = sumY / count;
+                    trackedObject = { x: targetX, y: targetY };
+                    targetZoom = 2.0; // 지정한 사물이 들어오도록 2배 줌인 고정
+                } else {
+                    // 일시적으로 사물을 놓치면 마지막 위치 유지
+                    targetX = trackedObject.x;
+                    targetY = trackedObject.y;
+                    targetZoom = 2.0;
                 }
+            } else {
+                // 사물을 지정하기 전에는 기본 화면
+                targetX = width / 2;
+                targetY = height / 2;
+                targetZoom = 1.0;
             }
 
-            // 부드러운 카메라 무빙 보정 (LERP)
-            const ease = 0.08;
+            // 부드러운 카메라 무빙(LERP) 처리
+            const ease = 0.1;
             currentCamX += (targetX - currentCamX) * ease;
             currentCamY += (targetY - currentCamY) * ease;
             currentZoom += (targetZoom - currentZoom) * ease;
 
-            // 줌 영역 계산 및 클리핑
+            // 화면 이탈 방지 크롭 영역 계산
             let cropW = width / currentZoom;
             let cropH = height / currentZoom;
             let cropX = currentCamX - cropW / 2;
@@ -313,16 +288,9 @@
             cropX = Math.max(0, Math.min(width - cropW, cropX));
             cropY = Math.max(0, Math.min(height - cropH, cropY));
 
-            // 화면에 줌인된 영상 출력
+            // 최종 화면에 줌인/크롭된 영상 출력
             dispCtx.clearRect(0, 0, width, height);
             dispCtx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, width, height);
-
-            // 사용자가 드래그하는 중이면 드래그 박스 시각화
-            if (isDragging) {
-                dispCtx.strokeStyle = '#00FF00';
-                dispCtx.lineWidth = 2;
-                dispCtx.strokeRect(startX, startY, endX - startX, endY - startY);
-            }
 
             requestAnimationFrame(processFrame);
         }
