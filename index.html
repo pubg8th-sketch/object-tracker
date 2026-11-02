@@ -95,7 +95,7 @@
         <div class="badge" id="statusBadge">터치하여 사물 선택</div>
         <canvas id="displayCanvas"></canvas>
     </div>
-    <div class="info">화면에서 따라가고 싶은 <strong>사물을 터치</strong>하세요. 해당 사물을 중심으로 자동 줌인됩니다.</div>
+    <div class="info">화면에서 따라가고 싶은 <strong>사물을 터치</strong>하세요. (후면 카메라 우선 연결)</div>
 
     <!-- 비공개 연산용 엘리먼트 -->
     <video id="webcam" autoplay playsinline muted></video>
@@ -111,12 +111,11 @@
         const statusBadge = document.getElementById('statusBadge');
 
         let currentStream = null;
-        let useFrontCamera = true;
+        let useFrontCamera = false; // ★ 기본값을 '후면(false)'으로 변경하여 시작 시 후면을 우선 호출
 
-        let targetColor = null; // 사용자가 지정한 사물 색상
-        let trackedObject = null; // 현재 지정된 사물 위치 {x, y}
+        let targetColor = null; 
+        let trackedObject = null; 
 
-        // 부드러운 카메라 이동 및 줌을 위한 변수
         let currentCamX = 320;
         let currentCamY = 240;
         let currentZoom = 1.0;
@@ -126,49 +125,63 @@
                 currentStream.getTracks().forEach(track => track.stop());
             }
 
-            const constraints = {
-                video: {
-                    width: { ideal: 640 },
-                    height: { ideal: 480 },
-                    facingMode: useFrontCamera ? 'user' : 'environment'
-                }
+            // 기기에서 사용 가능한 카메라 장치 목록을 먼저 조회하여 후면 카메라를 강제로 찾습니다.
+            let videoConstraints = {
+                width: { ideal: 640 },
+                height: { ideal: 480 },
+                facingMode: useFrontCamera ? 'user' : { exact: 'environment' } // 후면 카메라 강제 지정 방식 수정
             };
 
             try {
-                currentStream = await navigator.mediaDevices.getUserMedia(constraints);
-                video.srcObject = currentStream;
-                return new Promise((resolve) => {
-                    video.onloadedmetadata = () => {
-                        procCanvas.width = video.videoWidth;
-                        procCanvas.height = video.videoHeight;
-                        dispCanvas.width = video.videoWidth;
-                        dispCanvas.height = video.videoHeight;
-                        currentCamX = video.videoWidth / 2;
-                        currentCamY = video.videoHeight / 2;
-                        resolve();
-                    };
-                });
-            } catch (err) {
-                alert("카메라 권한을 얻을 수 없습니다.");
+                // 먼저 exact 방식으로 후면 카메라를 호출 시도
+                currentStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
+            } catch (err1) {
+                console.warn("Exact facingMode 실패, 일반 모드로 재시도합니다.", err1);
+                try {
+                    // 구형 기기나 태블릿 브라우저 호환성을 위해 일반 모드로 재시도
+                    videoConstraints.facingMode = useFrontCamera ? 'user' : 'environment';
+                    currentStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints });
+                } catch (err2) {
+                    console.warn("facingMode 설정 실패, 기본 카메라로 연결합니다.", err2);
+                    try {
+                        // 모든 제약 조건을 풀고 기본 카메라라도 가져옴
+                        currentStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    } catch (err3) {
+                        alert("카메라를 실행할 수 없습니다. 권한을 확인해주세요.");
+                        console.error(err3);
+                        return;
+                    }
+                }
             }
+
+            video.srcObject = currentStream;
+            return new Promise((resolve) => {
+                video.onloadedmetadata = () => {
+                    procCanvas.width = video.videoWidth;
+                    procCanvas.height = video.videoHeight;
+                    dispCanvas.width = video.videoWidth;
+                    dispCanvas.height = video.videoHeight;
+                    currentCamX = video.videoWidth / 2;
+                    currentCamY = video.videoHeight / 2;
+                    resolve();
+                };
+            });
         }
 
         switchBtn.addEventListener('click', async () => {
             useFrontCamera = !useFrontCamera;
             targetColor = null;
             trackedObject = null;
-            statusBadge.innerText = "터치하여 사물 선택";
+            statusBadge.innerText = useFrontCamera ? "전면 카메라" : "후면 카메라";
             statusBadge.style.background = "rgba(0, 255, 204, 0.8)";
             await startCamera();
         });
 
-        // 화면 터치/클릭 시 해당 위치의 사물 색상 추출
         function handleTouchOrClick(clientX, clientY) {
             const rect = dispCanvas.getBoundingClientRect();
             const scaleX = dispCanvas.width / rect.width;
             const scaleY = dispCanvas.height / rect.height;
 
-            // 현재 줌인/크롭된 상태를 고려하여 실제 원본 비디오 좌표 계산
             const viewW = dispCanvas.width / currentZoom;
             const viewH = dispCanvas.height / currentZoom;
             const viewX = currentCamX - viewW / 2;
@@ -177,7 +190,6 @@
             const clickX = viewX + (clientX - rect.left) * scaleX * (viewW / dispCanvas.width);
             const clickY = viewY + (clientY - rect.top) * scaleY * (viewH / dispCanvas.height);
 
-            // 주변 5x5 영역의 평균 색상 추출 (인식률 향상)
             const sampleSize = 5;
             const startX = Math.max(0, Math.floor(clickX - sampleSize));
             const startY = Math.max(0, Math.floor(clickY - sampleSize));
@@ -213,7 +225,6 @@
             }
         }, { passive: false });
 
-        // 메인 루프: 지정된 사물 추적 및 자동 줌 처리
         function processFrame() {
             if (video.paused || video.ended) return;
 
@@ -230,8 +241,8 @@
 
             if (targetColor && trackedObject) {
                 let sumX = 0, sumY = 0, count = 0;
-                const colorThreshold = 75; // 색상 오차 허용 범위
-                const searchRadius = 120;  // 사물 주변 탐색 반경
+                const colorThreshold = 75; 
+                const searchRadius = 120;  
 
                 const startX = Math.max(0, Math.floor(trackedObject.x - searchRadius));
                 const endX = Math.min(width, Math.floor(trackedObject.x + searchRadius));
@@ -254,32 +265,27 @@
                     }
                 }
 
-                // 사물을 찾은 경우 위치 업데이트 및 자동 줌인 적용
                 if (count > 15) {
                     targetX = sumX / count;
                     targetY = sumY / count;
                     trackedObject = { x: targetX, y: targetY };
-                    targetZoom = 2.0; // 지정한 사물이 들어오도록 2배 줌인 고정
+                    targetZoom = 2.0; 
                 } else {
-                    // 일시적으로 사물을 놓치면 마지막 위치 유지
                     targetX = trackedObject.x;
                     targetY = trackedObject.y;
                     targetZoom = 2.0;
                 }
             } else {
-                // 사물을 지정하기 전에는 기본 화면
                 targetX = width / 2;
                 targetY = height / 2;
                 targetZoom = 1.0;
             }
 
-            // 부드러운 카메라 무빙(LERP) 처리
             const ease = 0.1;
             currentCamX += (targetX - currentCamX) * ease;
             currentCamY += (targetY - currentCamY) * ease;
             currentZoom += (targetZoom - currentZoom) * ease;
 
-            // 화면 이탈 방지 크롭 영역 계산
             let cropW = width / currentZoom;
             let cropH = height / currentZoom;
             let cropX = currentCamX - cropW / 2;
@@ -288,7 +294,6 @@
             cropX = Math.max(0, Math.min(width - cropW, cropX));
             cropY = Math.max(0, Math.min(height - cropH, cropY));
 
-            // 최종 화면에 줌인/크롭된 영상 출력
             dispCtx.clearRect(0, 0, width, height);
             dispCtx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, width, height);
 
